@@ -28,45 +28,194 @@ P0 does **not** contain:
 
 Those begin only after P0 is accepted as reproduced.
 
-## Workflow
+## Recommended reproducible workflow
 
-1. Run `bash p0/scripts/bootstrap_upstream.sh`.
-2. Create/activate a Python 3.12 environment.
-3. Install the exact upstream requirements.
-4. Verify solver availability with `python p0/scripts/preflight.py`.
-5. Generate the official scenario files using the upstream notebook `data/scenario_generation/generate_data.ipynb`.
-6. Run the official scripts first, without patches.
-7. If one of the documented upstream execution defects is encountered, apply `python p0/scripts/apply_minimal_patches.py`.
-8. Run the four baselines and record results in `p0/results/P0_REPRO_TEMPLATE.md`.
+### 1. Bootstrap the pinned upstream tree
+
+```bash
+bash p0/scripts/bootstrap_upstream.sh
+```
+
+### 2. Create a Python 3.12 environment and install the upstream requirements
+
+```bash
+cd vendor/comm-limited-congestion-mgmt
+python -m pip install -r requirements.txt
+cd ../..
+```
+
+The official main evaluation path requires a working Gurobi installation/license.
+
+### 3. Preflight
+
+```bash
+python p0/scripts/preflight.py \
+  --upstream vendor/comm-limited-congestion-mgmt
+```
+
+### 4. Generate the official scenarios deterministically
+
+The script below is a CLI transcription of the official
+`data/scenario_generation/generate_data.ipynb`.
+
+```bash
+python p0/scripts/generate_official_scenarios.py \
+  --upstream vendor/comm-limited-congestion-mgmt
+
+python p0/scripts/check_generated_data.py \
+  --upstream vendor/comm-limited-congestion-mgmt
+```
+
+### 5. Apply only the documented execution patches
+
+```bash
+python p0/scripts/apply_minimal_patches.py \
+  --upstream vendor/comm-limited-congestion-mgmt
+```
+
+From this point the run must be labeled `patched-reproduction`.
+
+### 6. Gate A — Smoke
+
+```bash
+python p0/scripts/generate_manifest.py \
+  --stage smoke \
+  --out p0/results/p0_smoke_manifest.csv
+
+python p0/scripts/execute_manifest.py \
+  --upstream vendor/comm-limited-congestion-mgmt \
+  --manifest p0/results/p0_smoke_manifest.csv \
+  --all
+```
+
+### 7. Normalize result filenames for the official notebook
+
+The raw `checkpoint_*.pt` files remain untouched.
+
+```bash
+python p0/scripts/normalize_result_names.py \
+  --upstream vendor/comm-limited-congestion-mgmt
+```
+
+### 8. Validate Gate A
+
+```bash
+python p0/scripts/validate_results.py \
+  --upstream vendor/comm-limited-congestion-mgmt \
+  --stage smoke \
+  --json-out p0/results/p0_smoke_report.json
+```
+
+### 9. Gate B — Main-figure reproduction
+
+```bash
+python p0/scripts/generate_manifest.py \
+  --stage main \
+  --out p0/results/p0_main_manifest.csv
+```
+
+This stage contains 400 process-level runs.
+
+For local execution:
+
+```bash
+python p0/scripts/execute_manifest.py \
+  --upstream vendor/comm-limited-congestion-mgmt \
+  --manifest p0/results/p0_main_manifest.csv \
+  --all \
+  --continue-on-error
+```
+
+For SLURM, submit one manifest row per array task and call:
+
+```bash
+python p0/scripts/execute_manifest.py \
+  --upstream vendor/comm-limited-congestion-mgmt \
+  --manifest p0/results/p0_main_manifest.csv \
+  --task-id "$SLURM_ARRAY_TASK_ID"
+```
+
+Then normalize and validate with `--stage main`.
+
+### 10. Gate C — Full notebook reproduction
+
+```bash
+python p0/scripts/generate_manifest.py \
+  --stage full \
+  --out p0/results/p0_full_manifest.csv
+```
+
+This stage contains the complete 560-run parameter grid expected by the
+official notebook data layer.
 
 ## Reproduction status labels
 
 - `official-unmodified`: pinned upstream code, no local patch.
-- `patched-reproduction`: only the explicitly documented P0 minimal execution fixes are applied.
+- `patched-reproduction`: only explicitly documented P0 execution fixes are applied.
 - `research-modified`: any algorithmic or modeling change. This label is forbidden in P0.
 
-## Important upstream defects already identified
+## Important upstream compatibility defects
 
-Static inspection of the pinned official scripts shows:
+See `p0/P0_COMPATIBILITY_AUDIT.md` for the full audit.
 
-1. `experiments/run_opt.py`: when `test_skew_mag == 0`, `all_test_trajs` is referenced before assignment; the final `torch.save` is commented.
-2. `experiments/run_dec.py`: same zero-skew uninitialized variable issue; final `torch.save` is commented.
-3. `experiments/run_ours.py`: the exception handler stores `failed_tests[(i,j)]` although `i` is undefined in that loop.
-4. `experiments/run_proxy.py`: same undefined `i` in the exception handler.
+The important items are:
 
-The P0 patch script changes only these execution defects. It must not alter equations, partitions, costs, trajectories, optimizers, or model logic.
+1. `run_opt.py`: zero-skew branch references `all_test_trajs` before assignment; final save is commented.
+2. `run_dec.py`: same issues.
+3. `run_ours.py`: exception path uses undefined `i`.
+4. `run_proxy.py`: same exception-path issue.
+5. `make_sweep_slurm.py` currently emits CLI arguments not accepted by the current experiment parsers.
+6. Raw checkpoint filenames do not match the filenames searched by `generate_figures.ipynb`.
 
-## P0 acceptance criteria
+P0 fixes only these reproduction-interface defects. Equations, partitions, costs,
+disturbance distributions, solver choices, horizons and optimizer settings remain
+those of the pinned upstream implementation.
 
-P0 is considered complete only when:
+## Official metric reproduced in P0
 
-- IEEE118 data load successfully;
-- the 3-area partition exactly matches the official experiment scripts;
-- scenario generation reproduces the official file/key structure;
-- OPT, DEC, PROXY and OURS all complete on at least one canonical configuration;
-- result tensors contain no unexpected NaN/Inf;
-- the same fixed random seeds are used;
-- generated figures/statistics can be traced back to raw checkpoint files;
-- every deviation from upstream is recorded.
+The main notebook reads:
 
-Numerical equality is not required bit-for-bit across hardware/solver versions, but the ordering and scale of the reported metrics must be consistent with the paper and official result-generation notebook before P1 begins.
+```
+total_losses[..., 0]
+```
+
+For the closed-loop evaluation functions:
+
+```
+total_losses = [total_loss, economic_loss, violation_loss]
+```
+
+The automatic validator reports:
+
+- OURS / OPT;
+- DEC / OPT;
+- PROXY / OURS;
+- percentage of PROXY/OURS case means above 1.05.
+
+These statistics directly correspond to the logic used by the official figure notebook.
+
+## P0 acceptance gates
+
+### Gate A — execution integrity
+
+- data generation passes;
+- Gurobi works;
+- OPT / DEC / PROXY / OURS all finish the canonical configuration;
+- checkpoint schemas and tensors are finite;
+- no unexplained trajectory failure remains.
+
+### Gate B — main-result integrity
+
+- all main-figure combinations exist;
+- the qualitative OURS-vs-DEC-vs-OPT relationship matches the official figures;
+- the distribution-shift trend matches the official figures;
+- the PROXY/OURS ratio distribution matches the official trend.
+
+### Gate C — full notebook integrity
+
+- all 560 experiment combinations exist;
+- result normalization reports no missing combinations;
+- the official `results/generate_figures.ipynb` runs end-to-end;
+- regenerated figures are consistent with the committed official figures.
+
+Only after P0 is frozen as `REPRODUCED` do we start P1.
